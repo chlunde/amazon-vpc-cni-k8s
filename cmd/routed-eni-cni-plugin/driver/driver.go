@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
@@ -32,6 +33,7 @@ import (
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/nswrapper"
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/procsyswrapper"
 	"github.com/aws/amazon-vpc-cni-k8s/pkg/utils/logger"
+	"github.com/aws/amazon-vpc-cni-k8s/pkg/utils/retry"
 )
 
 const (
@@ -286,8 +288,20 @@ func (os *linuxNetwork) SetupPodENINetwork(hostVethName string, contVethName str
 	vlanTableID := vlanID + 100
 	vlanLink := buildVlanLink(vlanID, parentIfIndex, eniMAC)
 
+	// 0. if vlan already exists, wait up to 1 minute for cleanup before taking over the VLAN
+	var oldVlan netlink.Link
+	err = retry.WithBackoff(retry.NewSimpleBackoff(time.Second, time.Minute, 0.2, 2), func() error {
+		var err error
+		oldVlan, err = os.netLink.LinkByName(vlanLink.Name)
+		if err == nil {
+			log.Infof("old vlan in use, waiting: %s", vlanLink.Name)
+			return errors.New("vlan ID in use")
+		}
+		return nil
+	})
+
 	// 1a. clean up if vlan already exists (necessary when trunk ENI changes).
-	if oldVlan, err := os.netLink.LinkByName(vlanLink.Name); err == nil {
+	if err != nil {
 		if err = os.netLink.LinkDel(oldVlan); err != nil {
 			return errors.Wrapf(err, "SetupPodENINetwork: failed to delete old vlan %s", vlanLink.Name)
 		}
